@@ -64,7 +64,6 @@ bool CreateProcessInWindowStation()
 
 int main()
 {
-	const char* windowStationName = "WinSta0";
 
 	CreateProcessInWindowStation();
 

