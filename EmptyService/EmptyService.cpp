@@ -3,6 +3,7 @@
 #include <WtsApi32.h>
 #include <tchar.h>
 #include <userenv.h>
+#include <tlhelp32.h>
 
 SERVICE_STATUS        g_ServiceStatus = { 0 };
 SERVICE_STATUS_HANDLE g_StatusHandle = NULL;
@@ -14,7 +15,6 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam);
 
 #define SERVICE_NAME  _T("My Sample Service")
 #define no_init_all deprecated
-
 int _tmain(int argc, TCHAR *argv[])
 { 
 	SERVICE_TABLE_ENTRY ServiceTable[] =
@@ -209,110 +209,96 @@ BOOL SetPrivilege(HANDLE hToken, LPCTSTR lpszPrivilege, BOOL bEnablePrivilege)
 	return TRUE;
 }
 
+DWORD findWinlogonProcess()
+{
+	HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	if (snapshot == INVALID_HANDLE_VALUE)
+	{
+		return 0;
+	}
+
+	PROCESSENTRY32 processEntry;
+	processEntry.dwSize = sizeof(PROCESSENTRY32);
+
+	if (!Process32First(snapshot, &processEntry))
+	{
+		CloseHandle(snapshot);
+		return 0;
+	}
+
+	do
+	{
+		if (wcscmp(processEntry.szExeFile, L"winlogon.exe") == 0)
+		{
+			CloseHandle(snapshot);
+			return processEntry.th32ProcessID;
+		}
+	} while (Process32Next(snapshot, &processEntry));
+
+	CloseHandle(snapshot);
+	return 0;
+}
+
 DWORD WINAPI ServiceWorkerThread(LPVOID lpParam)
 {
+	LPWSTR injector_path = (LPWSTR)L"C:\\Users\\ISE\\source\\repos\\Injector\\x64\\Release\\Injector.exe";
 	int do_once= 0;
 	//  Periodically check if the service has been requested to stop
 	while (WaitForSingleObject(g_ServiceStopEvent, 0) != WAIT_OBJECT_0)
 	{
-		
 		if (!do_once)
 		{
-			_printf("\nDo once\n");
 			do_once = 1;
-			HANDLE self_token;
+			HANDLE service_token;
 			HANDLE pHandle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, GetCurrentProcessId());
 			if (pHandle)
 			{
 				_printf("Get Current Process Finished\n");
+
 				// get the token of the service
-				if (OpenProcessToken(pHandle, TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &self_token))
+				if (OpenProcessToken(pHandle, TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &service_token))
 				{
 					_printf("OpenProcessToken Finished\n");
-					// Add SE_TCB_NAME privilege to the service token 
-					if (SetPrivilege(self_token, SE_TCB_NAME, TRUE))
+					DWORD logon_pid = findWinlogonProcess();
+					HANDLE winlogon_pHandle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, logon_pid);
+					HANDLE winlogonToken;
+					if (OpenProcessToken(winlogon_pHandle, TOKEN_ALL_ACCESS, &winlogonToken))
 					{
-						_printf("SetPrivilege Finished\n");
-						PWTS_SESSION_INFO pSessionInfo = NULL;
-						DWORD sessionCount = 0;
-						// Enumerate all sessions
-						if (WTSEnumerateSessions(WTS_CURRENT_SERVER_HANDLE, 0, 1, &pSessionInfo, &sessionCount))
+						_printf("OpenProcessToken Finished\n");
+						STARTUPINFO si = { 0 };
+						PROCESS_INFORMATION pi = { 0 };
+
+						si.cb = sizeof(si);
+						si.lpDesktop = LPWSTR(L"winsta0\\winlogon");
+
+						si.dwFlags = STARTF_USESHOWWINDOW;
+						si.wShowWindow = SW_HIDE;
+
+						BOOL create_process_ret = CreateProcessAsUser(winlogonToken, injector_path, NULL, NULL, NULL, FALSE, NULL, NULL, NULL, &si, &pi);
+						if (create_process_ret)
 						{
-							_printf("WTSEnumerateSessions Finished\n");
-							for (DWORD i = 0; i < sessionCount; ++i)
-							{
-								DWORD sessionId = pSessionInfo[i].SessionId;
-								if (sessionId != 0)
-								{
-									HANDLE userToken; 
-
-									if (WTSQueryUserToken(sessionId, &userToken))
-									{
-										HANDLE userTokenDup;
-										_printf("new cmd WTSQueryUserToken Finished\n");
-										if (DuplicateTokenEx(userToken, MAXIMUM_ALLOWED, NULL, SecurityDelegation, TokenPrimary, &userTokenDup))
-										{
-											_printf("DuplicateTokenEx Finished\n");
-
-											//LPWSTR cmd = (LPWSTR)L"C:\\Users\\ISE\\source\\repos\\Injector\\x64\\Debug\\Injector.exe";
-											LPWSTR cmd = (LPWSTR)L"C:\\Users\\ISE\\source\\repos\\Injector\\x64\\Release\\Injector.exe";
-											STARTUPINFO si = { 0 };
-											PROCESS_INFORMATION pi = { 0 };
-
-											si.cb = sizeof(si);
-											si.lpDesktop = LPWSTR(L"winsta0\\winlogon");
-											//si.lpDesktop = LPWSTR(L"winsta0\\default");
-											si.dwFlags = STARTF_USESHOWWINDOW;
-											si.wShowWindow = SW_HIDE;
-
-											LPVOID lpEnvironment = NULL;
-											CreateEnvironmentBlock(&lpEnvironment, userTokenDup, FALSE);
-
-											_printf("CreateProcessAsUser Started\n");
-											BOOL create_process_ret = CreateProcessAsUser(userTokenDup, cmd, NULL, NULL, NULL, FALSE, NORMAL_PRIORITY_CLASS | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT, lpEnvironment, NULL, &si, &pi);
-											_printf("CreateProcessAsUser Finished\n");
-											if (create_process_ret)
-											{
-												_printf("CreateProcessAsUser Finished\n");
-												CloseHandle(pi.hProcess);
-												CloseHandle(pi.hThread);
-												DestroyEnvironmentBlock(lpEnvironment);
-											}
-											else
-											{
-												_printf("CreateProcessAsUser failed:%d\n", GetLastError());
-											}
-										}
-										else
-										{
-											_printf("DuplicateTokenEx failed:%d\n", GetLastError());
-										}
-									}
-									else
-									{
-										_printf("WTSQueryUserToken Failed:%d\n", GetLastError());
-									}
-									CloseHandle(userToken);
-								}
-							}
-
-							WTSFreeMemory(pSessionInfo);
+							_printf("CreateProcessAsUser Finished\n");
+							CloseHandle(pi.hProcess);
+							CloseHandle(pi.hThread);
 						}
 						else
 						{
-							_printf("Enumerate Sessions failed%d\n", GetLastError());
+							_printf("CreateProcessAsUser failed:%d\n", GetLastError());
 						}
+						CloseHandle(winlogonToken);
 					}
 					else
 					{
-						_printf("SetPrivilege Failed%d\n", GetLastError());
+						_printf("Open winlogon token failed:%d\n", GetLastError());
 					}
+					CloseHandle(winlogon_pHandle);
+					CloseHandle(service_token);
 				}
 				else
 				{
 					_printf("Open Process Token Failed%d\n", GetLastError());
 				}
-				CloseHandle(self_token);
+				CloseHandle(pHandle);
 			}
 			else
 			{
@@ -322,7 +308,8 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam)
 		else
 		{
 			Sleep(1000);
-		}
+		} 
+		
 		
 	}
 
