@@ -1,6 +1,8 @@
 #include <Windows.h>
+#include <stdio.h>
 #include <WtsApi32.h>
 #include <tchar.h>
+#include <userenv.h>
 
 SERVICE_STATUS        g_ServiceStatus = { 0 };
 SERVICE_STATUS_HANDLE g_StatusHandle = NULL;
@@ -14,7 +16,7 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam);
 #define no_init_all deprecated
 
 int _tmain(int argc, TCHAR *argv[])
-{
+{ 
 	SERVICE_TABLE_ENTRY ServiceTable[] =
 	{
 		{LPWSTR(SERVICE_NAME), (LPSERVICE_MAIN_FUNCTION)ServiceMain},
@@ -149,45 +151,179 @@ VOID WINAPI ServiceCtrlHandler(DWORD CtrlCode)
 	}
 }
 
+void _printf(const char* format, ...)
+{
+	char msg[100];
+	wchar_t	wmsg[101];
+	va_list args;
+	va_start(args, format);
+	vsnprintf(msg, sizeof(msg), format, args); // do check return value
+	va_end(args);
+	size_t outsize;
+	size_t size = strlen(msg) + 1;
+	mbstowcs_s(&outsize, wmsg, size, msg, size - 1);
+	OutputDebugString(wmsg);
+}
+
+void _wprintf(const wchar_t* format, ...)
+{
+	wchar_t msg[100];
+	va_list args;
+	va_start(args, format);
+	vswprintf(msg, sizeof(msg) / sizeof(wchar_t), format, args); // do check return value
+	va_end(args);
+	OutputDebugStringW(msg);
+}
+
+BOOL SetPrivilege(HANDLE hToken, LPCTSTR lpszPrivilege, BOOL bEnablePrivilege)
+{
+	TOKEN_PRIVILEGES tp;
+	LUID luid;
+
+	if (!LookupPrivilegeValue(NULL, lpszPrivilege, &luid))      
+	{
+		_printf("LookupPrivilegeValue error: %u\n", GetLastError());
+		return FALSE;
+	}
+
+	tp.PrivilegeCount = 1;
+	tp.Privileges[0].Luid = luid;
+	if (bEnablePrivilege)
+		tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+	else
+		tp.Privileges[0].Attributes = 0;
+
+	// Enable the privilege or disable all privileges.
+
+	if (!AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(TOKEN_PRIVILEGES), (PTOKEN_PRIVILEGES)NULL, (PDWORD)NULL))
+	{
+		_printf("AdjustTokenPrivileges error: %u\n", GetLastError());
+		return FALSE;
+	}
+
+	if (GetLastError() == ERROR_NOT_ALL_ASSIGNED)
+	{
+		_printf("The token does not have the specified privilege. \n");
+		return FALSE;
+	}
+	return TRUE;
+}
+
 DWORD WINAPI ServiceWorkerThread(LPVOID lpParam)
 {
+	int do_once= 0;
 	//  Periodically check if the service has been requested to stop
 	while (WaitForSingleObject(g_ServiceStopEvent, 0) != WAIT_OBJECT_0)
 	{
-		PWTS_SESSION_INFO pSessionInfo = NULL;
-		DWORD sessionCount = 0;
-
-		if (WTSEnumerateSessions(WTS_CURRENT_SERVER_HANDLE, 0, 1, &pSessionInfo, &sessionCount))
+		
+		if (!do_once)
 		{
-			for (DWORD i = 0; i < sessionCount; ++i)
+			_printf("\nDo once\n");
+			do_once = 1;
+			HANDLE self_token;
+			HANDLE pHandle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, GetCurrentProcessId());
+			if (pHandle)
 			{
-				DWORD sessionId = pSessionInfo[i].SessionId;
-				std::cout << "Session ID: " << sessionId << std::endl;
-				std::cout << "Session State: " << pSessionInfo[i].State << std::endl;
-
-				// Retrieve username
-				LPWSTR pUserName = NULL;
-				DWORD userNameLen = 0;
-				if (WTSQuerySessionInformation(WTS_CURRENT_SERVER_HANDLE, sessionId, WTSUserName, &pUserName, &userNameLen))
+				_printf("Get Current Process Finished\n");
+				// get the token of the service
+				if (OpenProcessToken(pHandle, TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &self_token))
 				{
-					std::wcout << "Username: " << pUserName << std::endl;
-					WTSFreeMemory(pUserName);
+					_printf("OpenProcessToken Finished\n");
+					// Add SE_TCB_NAME privilege to the service token 
+					if (SetPrivilege(self_token, SE_TCB_NAME, TRUE))
+					{
+						_printf("SetPrivilege Finished\n");
+						PWTS_SESSION_INFO pSessionInfo = NULL;
+						DWORD sessionCount = 0;
+						// Enumerate all sessions
+						if (WTSEnumerateSessions(WTS_CURRENT_SERVER_HANDLE, 0, 1, &pSessionInfo, &sessionCount))
+						{
+							_printf("WTSEnumerateSessions Finished\n");
+							for (DWORD i = 0; i < sessionCount; ++i)
+							{
+								DWORD sessionId = pSessionInfo[i].SessionId;
+								if (sessionId != 0)
+								{
+									HANDLE userToken; 
+
+									if (WTSQueryUserToken(sessionId, &userToken))
+									{
+										HANDLE userTokenDup;
+										_printf("new cmd WTSQueryUserToken Finished\n");
+										if (DuplicateTokenEx(userToken, MAXIMUM_ALLOWED, NULL, SecurityDelegation, TokenPrimary, &userTokenDup))
+										{
+											_printf("DuplicateTokenEx Finished\n");
+
+											//LPWSTR cmd = (LPWSTR)L"C:\\Users\\ISE\\source\\repos\\Injector\\x64\\Debug\\Injector.exe";
+											LPWSTR cmd = (LPWSTR)L"C:\\Users\\ISE\\source\\repos\\Injector\\x64\\Release\\Injector.exe";
+											STARTUPINFO si = { 0 };
+											PROCESS_INFORMATION pi = { 0 };
+
+											si.cb = sizeof(si);
+											si.lpDesktop = LPWSTR(L"winsta0\\winlogon");
+											//si.lpDesktop = LPWSTR(L"winsta0\\default");
+											si.dwFlags = STARTF_USESHOWWINDOW;
+											si.wShowWindow = SW_HIDE;
+
+											LPVOID lpEnvironment = NULL;
+											CreateEnvironmentBlock(&lpEnvironment, userTokenDup, FALSE);
+
+											_printf("CreateProcessAsUser Started\n");
+											BOOL create_process_ret = CreateProcessAsUser(userTokenDup, cmd, NULL, NULL, NULL, FALSE, NORMAL_PRIORITY_CLASS | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT, lpEnvironment, NULL, &si, &pi);
+											_printf("CreateProcessAsUser Finished\n");
+											if (create_process_ret)
+											{
+												_printf("CreateProcessAsUser Finished\n");
+												CloseHandle(pi.hProcess);
+												CloseHandle(pi.hThread);
+												DestroyEnvironmentBlock(lpEnvironment);
+											}
+											else
+											{
+												_printf("CreateProcessAsUser failed:%d\n", GetLastError());
+											}
+										}
+										else
+										{
+											_printf("DuplicateTokenEx failed:%d\n", GetLastError());
+										}
+									}
+									else
+									{
+										_printf("WTSQueryUserToken Failed:%d\n", GetLastError());
+									}
+									CloseHandle(userToken);
+								}
+							}
+
+							WTSFreeMemory(pSessionInfo);
+						}
+						else
+						{
+							_printf("Enumerate Sessions failed%d\n", GetLastError());
+						}
+					}
+					else
+					{
+						_printf("SetPrivilege Failed%d\n", GetLastError());
+					}
 				}
 				else
 				{
-					std::cerr << "Failed to retrieve username. Error code: " << GetLastError() << std::endl;
+					_printf("Open Process Token Failed%d\n", GetLastError());
 				}
-
-				std::cout << "Session Name: " << pSessionInfo[i].pWinStationName << std::endl;
-				std::cout << "---------------------------------------" << std::endl;
+				CloseHandle(self_token);
 			}
-
-			WTSFreeMemory(pSessionInfo);
+			else
+			{
+				_printf("GetCurrentProcess Failed:%d\n", GetLastError());
+			}
 		}
 		else
 		{
-			std::cerr << "Failed to enumerate sessions. Error code: " << GetLastError() << std::endl;
+			Sleep(1000);
 		}
+		
 	}
 
 	return ERROR_SUCCESS;
