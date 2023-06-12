@@ -10,57 +10,6 @@
 
 
 
-bool CreateProcessInWindowStation()
-{
-	// Step 1: Obtain a handle to the target window station
-	HWINSTA hWinSta = OpenWindowStation(L"WinSta0", FALSE, READ_CONTROL | WRITE_DAC);
-	if (hWinSta == nullptr)
-	{
-		std::cout << "Failed to open window station. Error: " << GetLastError() << std::endl;
-		return false;
-	}
-
-	// Step 2: Switch to the desired window station
-	if (!SetProcessWindowStation(hWinSta))
-	{
-		std::cout << "Failed to set window station. Error: " << GetLastError() << std::endl;
-		CloseWindowStation(hWinSta);
-		return false;
-	}
-
-	// Step 3: Create the process
-	STARTUPINFO si = {};
-	si.cb = sizeof(STARTUPINFO);
-	PROCESS_INFORMATION pi = {};
-
-	if (!CreateProcess(
-		L"C:\\Users\\ISE\\source\\repos\\WinSta0\\x64\\Debug\\WinSta0.exe",                // Module name (use command line)
-		NULL,  // Command line
-		NULL,                // Process attributes
-		NULL,                // Thread attributes
-		FALSE,                  // Inherit handles
-		0,                      // Creation flags
-		NULL,                // Environment variables
-		NULL,                // Current directory
-		&si,                    // Startup info
-		&pi                     // Process info
-	))
-	{
-		std::cout << "Failed to create process. Error: " << GetLastError() << std::endl;
-		CloseWindowStation(hWinSta);
-		return false;
-	}
-
-	// Step 4: Restore the original window station
-	SetProcessWindowStation(GetProcessWindowStation());
-
-	// Cleanup
-	CloseWindowStation(hWinSta);
-	CloseHandle(pi.hProcess);
-	CloseHandle(pi.hThread);
-
-	return true;
-}
  
 void _printf(const char* format, ...)
 {
